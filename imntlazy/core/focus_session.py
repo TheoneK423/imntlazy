@@ -22,13 +22,23 @@ class FocusSession(QObject):
         self._window_restrictor = window_restrictor
         self._website_blocker = website_blocker
         self._settings = settings
-        self._current_timer: CountdownTimer | None = None
+        self._current_timer = CountdownTimer(0, self)
+        self._current_timer.tick.connect(self._on_timer_tick_internal)
+        self._current_timer.expired.connect(self._on_timer_expired_internal)
+        self._current_phase_duration = 0
         self._total_elapsed = 0  # seconds
         self._total_duration = 0  # seconds
+        self._last_cleanup_error: OSError | None = None
+        self._phase_state: FocusState | None = None
+        self._phase_expired_handler = None
 
     @property
     def current_state(self) -> FocusState:
         return self._state_machine.current_state
+
+    @property
+    def last_cleanup_error(self) -> OSError | None:
+        return self._last_cleanup_error
 
     def start(self, total_seconds: int):
         if not self._state_machine.can_transition(FocusState.WORKING):
@@ -54,51 +64,93 @@ class FocusSession(QObject):
                 self._current_timer.resume()
             self._transition(FocusState.WORKING)
 
-    def force_stop(self):
-        if self._current_timer:
-            self._current_timer.stop()
-            self._current_timer = None
-        self._website_blocker.unblock()
+    def force_stop(self, emit_state: bool = True):
+        self._clear_timer()
+        self._last_cleanup_error = None
+        try:
+            self._website_blocker.unblock()
+        except OSError as exc:
+            self._last_cleanup_error = exc
         self._window_restrictor.disable()
-        self._transition(FocusState.ENDED)
+        if emit_state:
+            self._transition(FocusState.ENDED)
+        else:
+            self._state_machine.current_state = FocusState.ENDED
 
     # ── internals ──
 
     def _start_work_timer(self):
-        dur = self._settings.work_duration_minutes * 60
-        self._current_timer = CountdownTimer(dur, self)
-        self._current_timer.tick.connect(
-            lambda r: self.timer_tick.emit(FocusState.WORKING, r))
-        self._current_timer.expired.connect(self._on_work_expired)
-        self._current_timer.start()
+        self._start_phase_timer(
+            FocusState.WORKING,
+            min(self._settings.work_duration_minutes * 60, self._remaining_total()),
+            self._on_work_expired,
+        )
 
     def _on_work_expired(self):
-        self._total_elapsed += self._settings.work_duration_minutes * 60
-        if self._total_elapsed + self._settings.work_duration_minutes * 60 < self._total_duration:
-            self._website_blocker.unblock()
-            self._window_restrictor.disable()
-            self._transition(FocusState.BREAK)
-            self._start_break_timer()
-        else:
+        self._finish_current_phase()
+        remaining = self._remaining_total()
+        break_duration = self._settings.break_duration_minutes * 60
+        if remaining <= 0 or remaining <= break_duration:
             self.force_stop()
+            return
+
+        self._website_blocker.unblock()
+        self._window_restrictor.disable()
+        self._transition(FocusState.BREAK)
+        self._start_break_timer()
 
     def _start_break_timer(self):
-        dur = self._settings.break_duration_minutes * 60
-        self._current_timer = CountdownTimer(dur, self)
-        self._current_timer.tick.connect(
-            lambda r: self.timer_tick.emit(FocusState.BREAK, r))
-        self._current_timer.expired.connect(self._on_break_expired)
-        self._current_timer.start()
+        self._start_phase_timer(
+            FocusState.BREAK,
+            self._settings.break_duration_minutes * 60,
+            self._on_break_expired,
+        )
 
     def _on_break_expired(self):
-        self._total_elapsed += self._settings.break_duration_minutes * 60
-        if self._total_elapsed >= self._total_duration:
+        self._finish_current_phase()
+        if self._remaining_total() <= 0:
             self.force_stop()
             return
         self._website_blocker.block()
         self._window_restrictor.enable()
         self._transition(FocusState.WORKING)
         self._start_work_timer()
+
+    def _start_phase_timer(self, state: FocusState, duration: int, on_expired):
+        if duration <= 0:
+            self.force_stop()
+            return
+
+        self._clear_timer()
+        self._phase_state = state
+        self._phase_expired_handler = on_expired
+        self._current_phase_duration = duration
+        self._current_timer.reset(duration)
+        self._current_timer.start()
+
+    def _finish_current_phase(self):
+        self._total_elapsed = min(
+            self._total_duration,
+            self._total_elapsed + self._current_phase_duration,
+        )
+        self._clear_timer()
+
+    def _remaining_total(self) -> int:
+        return max(0, self._total_duration - self._total_elapsed)
+
+    def _clear_timer(self):
+        self._current_timer.stop()
+        self._phase_state = None
+        self._phase_expired_handler = None
+        self._current_phase_duration = 0
+
+    def _on_timer_tick_internal(self, remaining: int):
+        if self._phase_state is not None:
+            self.timer_tick.emit(self._phase_state, remaining)
+
+    def _on_timer_expired_internal(self):
+        if self._phase_expired_handler is not None:
+            self._phase_expired_handler()
 
     def _transition(self, state: FocusState):
         try:

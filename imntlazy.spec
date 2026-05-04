@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import os
+import cv2
 
 a = Analysis(
     ['run.py'],
@@ -8,6 +9,12 @@ a = Analysis(
     binaries=[],
     datas=[
         (os.path.join('imntlazy', 'resources', 'haarcascade_frontalface_default.xml'),
+         os.path.join('imntlazy', 'resources')),
+        (os.path.join(cv2.data.haarcascades, 'haarcascade_eye_tree_eyeglasses.xml'),
+         os.path.join('imntlazy', 'resources')),
+        (os.path.join('imntlazy', 'resources', 'app_icon.png'),
+         os.path.join('imntlazy', 'resources')),
+        (os.path.join('imntlazy', 'resources', 'app_icon.ico'),
          os.path.join('imntlazy', 'resources')),
     ],
     hiddenimports=[

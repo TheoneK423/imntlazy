@@ -41,8 +41,8 @@ def _remove_section_from_string(content: str) -> str:
 
 
 def append_block_section(domains: list[str]) -> None:
-    content = read_hosts()
-    content = _remove_section_from_string(content)
+    original = read_hosts()
+    content = _remove_section_from_string(original)
 
     lines = [BEGIN_MARKER]
     for d in domains:
@@ -57,13 +57,15 @@ def append_block_section(domains: list[str]) -> None:
     if content and not content.endswith("\n"):
         content += "\n"
     content += "\n" + "\n".join(lines) + "\n"
-    write_hosts(content)
+    if content != original:
+        write_hosts(content)
 
 
 def remove_block_section() -> None:
-    content = read_hosts()
-    content = _remove_section_from_string(content)
-    write_hosts(content)
+    original = read_hosts()
+    content = _remove_section_from_string(original)
+    if content != original:
+        write_hosts(content)
 
 
 def flush_dns() -> None:

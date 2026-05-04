@@ -1,5 +1,6 @@
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QMessageBox
 from PySide6.QtGui import QIcon, QAction
+from PySide6.QtCore import QTimer
 from .ui.dashboard import Dashboard, make_icon
 from .models import AppSettings, FocusState
 from .core.window_restrictor import WindowRestrictor
@@ -21,6 +22,8 @@ class ImntlazyApp:
         self._session: FocusSession | None = None
         self._overlay: Overlay | None = None
         self._dashboard: Dashboard | None = None
+        self._stop_dialog: ExitConfirmDialog | None = None
+        self._stop_requested = False
 
         self._window_restrictor.load_whitelist(self._settings.whitelisted_windows)
         self._website_blocker.load_domains(self._settings.blocked_domains)
@@ -51,6 +54,8 @@ class ImntlazyApp:
 
     def _build_tray_menu(self) -> QMenu:
         menu = QMenu()
+        menu.setObjectName("trayMenu")
+        menu.setStyleSheet(self._tray_menu_style())
 
         self._act_status = menu.addAction("I'm not lazy. — 空闲")
         self._act_status.setEnabled(False)
@@ -74,6 +79,39 @@ class ImntlazyApp:
         menu.addAction("退出").triggered.connect(self._exit_app)
 
         return menu
+
+    @staticmethod
+    def _tray_menu_style() -> str:
+        return """
+            QMenu {
+                background-color: #0f172a;
+                border: 1px solid #1e293b;
+                border-radius: 16px;
+                padding: 8px;
+                color: #e2e8f0;
+            }
+            QMenu::item {
+                padding: 10px 18px;
+                margin: 2px 4px;
+                border-radius: 10px;
+                background-color: transparent;
+                color: #e2e8f0;
+            }
+            QMenu::item:selected {
+                background-color: #2563eb;
+                color: #ffffff;
+            }
+            QMenu::item:disabled {
+                background-color: #111c31;
+                color: #93a4bd;
+                font-weight: 600;
+            }
+            QMenu::separator {
+                height: 1px;
+                margin: 6px 10px;
+                background-color: #22304a;
+            }
+        """
 
     # ── Actions ───────────────────────────────────────────────────────
 
@@ -120,11 +158,40 @@ class ImntlazyApp:
             FocusState.IDLE, FocusState.ENDED
         ):
             return
+        if self._stop_dialog is not None:
+            self._stop_dialog.raise_()
+            self._stop_dialog.activateWindow()
+            return
 
-        dlg = ExitConfirmDialog(self._settings.exit_confirmation_phrase)
-        if dlg.exec() == ExitConfirmDialog.DialogCode.Accepted:
-            self._session.force_stop()
-            self._session = None
+        self._show_dashboard()
+
+        dlg = ExitConfirmDialog(self._settings.exit_confirmation_phrase, self._dashboard)
+        dlg.accepted.connect(self._request_stop)
+        dlg.finished.connect(self._clear_stop_dialog)
+        self._stop_dialog = dlg
+        dlg.open()
+
+    def _request_stop(self):
+        self._stop_requested = True
+        QTimer.singleShot(0, self._finalize_stop_request)
+
+    def _clear_stop_dialog(self):
+        if self._stop_dialog is not None:
+            self._stop_dialog.deleteLater()
+            self._stop_dialog = None
+
+    def _finalize_stop_request(self):
+        if not self._stop_requested:
+            return
+        self._stop_requested = False
+        if self._session is None or self._session.current_state in (
+            FocusState.IDLE, FocusState.ENDED
+        ):
+            return
+        self._session.force_stop(emit_state=False)
+        self._complete_stop_flow()
+        self._tray.showMessage("imntlazy", "专注模式已结束。",
+                               QSystemTrayIcon.MessageIcon.Information, 3000)
 
     def _on_pause_resume(self):
         if self._session is None:
@@ -152,11 +219,13 @@ class ImntlazyApp:
             self._website_blocker.load_domains(self._settings.blocked_domains)
 
     def _show_dashboard(self):
-        if self._dashboard and not self._dashboard.isHidden():
-            self._dashboard.raise_()
-            self._dashboard.activateWindow()
-        elif self._dashboard:
-            self._dashboard.show()
+        if not self._dashboard:
+            return
+
+        self._dashboard.showNormal()
+        self._dashboard.show()
+        self._dashboard.raise_()
+        self._dashboard.activateWindow()
 
     def _exit_app(self):
         if self._session:
@@ -221,17 +290,30 @@ class ImntlazyApp:
                 ds.update_status("已暂停", "", True)
                 ds.set_pause_text("恢复")
         elif state == FocusState.ENDED:
-            self._update_tray_state("空闲", False)
-            self._act_pause.setText("暂停")
-            self._face_detector.stop_monitoring()
-            self._on_face_detected()
-            if ds:
-                ds.update_status("空闲 — 等待开始专注", "", False)
-                ds.set_pause_text("暂停")
+            self._complete_stop_flow()
             self._tray.showMessage("imntlazy", "专注模式已结束。",
                                    QSystemTrayIcon.MessageIcon.Information, 3000)
-            self._session = None
-            self._show_dashboard()
+
+    def _complete_stop_flow(self):
+        cleanup_error = self._session.last_cleanup_error if self._session else None
+        self._update_tray_state("空闲", False)
+        self._act_pause.setText("暂停")
+        self._face_detector.stop_monitoring()
+        self._on_face_detected()
+        if self._dashboard:
+            self._dashboard.update_status("空闲 — 等待开始专注", "", False)
+            self._dashboard.set_pause_text("暂停")
+        self._session = None
+        self._tray.show()
+        self._show_dashboard()
+        QTimer.singleShot(0, self._show_dashboard)
+        if cleanup_error:
+            self._tray.showMessage(
+                "imntlazy",
+                f"专注已停止，但清理网站屏蔽时出错：{cleanup_error}",
+                QSystemTrayIcon.MessageIcon.Warning,
+                5000,
+            )
 
     def _on_timer_tick(self, state: FocusState, remaining: int):
         mins = remaining // 60

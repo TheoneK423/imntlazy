@@ -38,6 +38,7 @@ def get_window_title(hwnd: int) -> str:
 
 
 def get_process_name(hwnd: int) -> str:
+    hproc = None
     try:
         pid = wintypes.DWORD()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
@@ -50,9 +51,11 @@ def get_process_name(hwnd: int) -> str:
         size = wintypes.DWORD(260)
         if psapi.GetModuleBaseNameW(hproc, None, name_buf, size):
             return name_buf.value
-        kernel32.CloseHandle(hproc)
     except Exception:
         pass
+    finally:
+        if hproc:
+            kernel32.CloseHandle(hproc)
     return ""
 
 
